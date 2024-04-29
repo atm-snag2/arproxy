@@ -31,6 +31,30 @@ describe Arproxy do
     end
   end
 
+  class ProxyX < Arproxy::Base
+    class << self
+      def push(*args)
+        @calls ||= []
+        @calls << args
+      end
+
+      def calls
+        @calls
+      end
+
+      def clear
+        @calls = []
+      end
+    end
+
+    def execute(sql, name, **kwargs)
+      ProxyX.push(sql, name, kwargs)
+      super
+    end
+  end
+
+  class User < ActiveRecord::Base; end
+
   let(:connection) { ::ActiveRecord::ConnectionAdapters::DummyAdapter.new }
   subject { connection.execute "SQL", "NAME" }
   after(:each) do
@@ -167,6 +191,77 @@ describe Arproxy do
       let!(:thr2) { Thread.new { connection.dup.execute 'SELECT 1' } }
 
       it { expect(thr1.value).not_to eq(thr2.value) }
+    end
+  end
+
+  context 'use mysql adapter' do
+    before do
+      ActiveRecord::Base.establish_connection(ENV['MYSQL_DATABASE_URL'] || "mysql2://root@0.0.0.0/arp_test")
+
+      Arproxy.clear_configuration
+      Arproxy.configure do |config|
+        config.adapter = 'mysql2'
+        config.use ProxyX
+      end
+      Arproxy.enable!
+
+      con = ActiveRecord::Base.connection
+      con.execute 'DROP TABLE IF EXISTS users'
+      con.execute <<-DDL
+        CREATE TABLE users (
+          id INT PRIMARY KEY AUTO_INCREMENT,
+          name VARCHAR(100) NOT NULL
+        )
+      DDL
+
+      ProxyX.clear
+    end
+
+    after do
+      ProxyX.clear
+    end
+
+    subject { User.create(name: 'test') }
+
+    it do
+      expect(subject).to be_an_instance_of(User)
+      expect(ProxyX.calls).to include(["INSERT INTO `users` (`name`) VALUES ('test')", "User Create", an_instance_of(Hash)])
+    end
+  end
+
+  context 'use postgresql adapter' do
+    before do
+      ActiveRecord::Base.establish_connection(ENV['POSTGRES_DATABASE_URL'] || "postgres://postgres@0.0.0.0/arp_test")
+
+      Arproxy.clear_configuration
+      Arproxy.configure do |config|
+        config.adapter = 'postgresql'
+        config.use ProxyX
+      end
+      Arproxy.enable!
+
+      con = ActiveRecord::Base.connection
+      con.execute 'DROP TABLE IF EXISTS users'
+      con.execute <<-DDL
+        CREATE TABLE users (
+          id bigserial NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          CONSTRAINT users_pkey PRIMARY KEY (id)
+        )
+      DDL
+
+      ProxyX.clear
+    end
+
+    after do
+      ProxyX.clear
+    end
+
+    subject { User.create(name: 'test') }
+
+    it do
+      expect(subject).to be_an_instance_of(User)
+      # expect(ProxyX.calls).to include(["INSERT INTO `users` (`name`) VALUES ('test')", "User Create", an_instance_of(Hash)])
     end
   end
 end
